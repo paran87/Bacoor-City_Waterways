@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Bacoor City Waterways &mdash; Interactive Map</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
@@ -21,7 +21,7 @@
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-  #app { display: flex; height: 100vh; overflow: hidden; background: var(--bg); color: var(--text); }
+  #app { display: flex; height: 100vh; height: 100dvh; overflow: hidden; background: var(--bg); color: var(--text); }
 
   /* Sidebar */
   #sidebar {
@@ -88,8 +88,11 @@
     background: rgba(16,35,58,0.92); border: 1px solid rgba(255,255,255,0.12);
     border-radius: 10px; padding: 10px 12px; font-size: 12px; color: var(--text);
   }
+  #legend .legend-title { display: none; font-weight: 600; }
+  #legend .legend-rows { display: block; }
   #legend .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
-  #legend .swatch { width: 14px; height: 8px; border-radius: 2px; }
+  #legend .swatch { width: 14px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
+  #legend-toggle { display: none; }
 
   .leaflet-popup-content-wrapper { background: var(--panel); color: var(--text); }
   .leaflet-popup-tip { background: var(--panel); }
@@ -101,11 +104,33 @@
     #sidebar { position: absolute; left: 0; top: 0; bottom: 0; transform: translateX(-100%);
       transition: transform .25s ease; box-shadow: 0 0 40px rgba(0,0,0,.5); }
     #app.nav-open #sidebar { transform: translateX(0); }
-    #menu-toggle { display: flex; position: absolute; top: 12px; left: 12px; z-index: 1300;
+    #menu-toggle { display: flex; position: absolute;
+      top: calc(12px + env(safe-area-inset-top)); left: 12px; z-index: 1300;
       background: var(--panel); color: var(--text); border: 1px solid rgba(255,255,255,.15);
       border-radius: 8px; width: 42px; height: 42px; align-items: center; justify-content: center;
       font-size: 20px; cursor: pointer; }
-    #info-panel { width: calc(100% - 24px); }
+
+    /* Push Leaflet's top-left zoom controls below the hamburger so they don't overlap */
+    .leaflet-top.leaflet-left { margin-top: calc(58px + env(safe-area-inset-top)); }
+    .leaflet-top.leaflet-left .leaflet-control { margin-left: 12px; }
+    .leaflet-top.leaflet-right { margin-top: env(safe-area-inset-top); }
+
+    #info-panel { width: calc(100% - 24px);
+      top: calc(16px + env(safe-area-inset-top)); }
+
+    /* Collapsible, always-visible legend that stays above the browser chrome */
+    #legend {
+      left: 12px; bottom: calc(12px + env(safe-area-inset-bottom));
+      padding: 0; font-size: 11.5px; max-width: calc(100% - 24px);
+    }
+    #legend .legend-title {
+      display: flex; align-items: center; gap: 8px; cursor: pointer;
+      padding: 9px 12px; user-select: none;
+    }
+    #legend .legend-title::before { content: "\25BC"; font-size: 9px; color: var(--muted); }
+    #legend.collapsed .legend-title::before { content: "\25B6"; }
+    #legend .legend-rows { padding: 0 12px 10px; }
+    #legend.collapsed .legend-rows { display: none; }
   }
 </style>
 </head>
@@ -137,10 +162,13 @@
     </div>
 
     <div id="legend">
-      <div class="row"><span class="swatch" style="background:#1565c0"></span> Major River</div>
-      <div class="row"><span class="swatch" style="background:#16a34a"></span> Tributary / Waterway</div>
-      <div class="row"><span class="swatch" style="background:#fbbf24;border-radius:50%;width:10px;height:10px"></span> Landmark / Dam / Bay</div>
-      <div class="row"><span class="swatch" style="background:#ff2d55"></span> Selected</div>
+      <div class="legend-title" id="legend-title">Legend</div>
+      <div class="legend-rows">
+        <div class="row"><span class="swatch" style="background:#1565c0"></span> Major River</div>
+        <div class="row"><span class="swatch" style="background:#16a34a"></span> Tributary / Waterway</div>
+        <div class="row"><span class="swatch" style="background:#fbbf24;border-radius:50%;width:10px;height:10px"></span> Landmark / Dam / Bay</div>
+        <div class="row"><span class="swatch" style="background:#ff2d55"></span> Selected</div>
+      </div>
     </div>
   </div>
 </div>
@@ -355,6 +383,12 @@ buildList("");
 document.getElementById("search").addEventListener("input", (e) => buildList(e.target.value));
 document.getElementById("menu-toggle").addEventListener("click", () =>
   document.getElementById("app").classList.toggle("nav-open"));
+
+// Collapsible legend (mobile). Start collapsed on small screens to save space.
+const legend = document.getElementById("legend");
+if (window.matchMedia("(max-width: 760px)").matches) legend.classList.add("collapsed");
+document.getElementById("legend-title").addEventListener("click", () =>
+  legend.classList.toggle("collapsed"));
 
 // Summary in header subtitle
 const counts = DATA.features.reduce((a, ft) => (a[ft.properties.category] = (a[ft.properties.category]||0)+1, a), {});
