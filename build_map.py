@@ -502,8 +502,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .leaflet-top.leaflet-left .leaflet-control { margin-left: 12px; }
     .leaflet-top.leaflet-right { margin-top: env(safe-area-inset-top); }
 
-    #info-panel { width: calc(100% - 24px);
-      top: calc(16px + env(safe-area-inset-top)); }
+    /* Bottom sheet: map stays visible above; panel scrolls inside */
+    #info-panel {
+      left: 0; right: 0; top: auto; bottom: 0; width: 100%; max-width: 100%;
+      border-radius: 16px 16px 0 0;
+      transform: translateY(110%);
+      max-height: min(48dvh, 380px);
+      display: flex; flex-direction: column;
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    #info-panel.open { transform: translateY(0); }
+    #info-panel .ip-head { flex: 0 0 auto; }
+    #info-panel .ip-body {
+      flex: 1 1 auto; min-height: 0; max-height: none;
+      overflow-y: auto; -webkit-overflow-scrolling: touch;
+    }
+    /* Keep legend above the bottom sheet when panel is open */
+    #app.panel-open #legend {
+      bottom: calc(min(48dvh, 380px) + 12px + env(safe-area-inset-bottom));
+    }
 
     /* Collapsible, always-visible legend that stays above the browser chrome */
     #legend {
@@ -780,6 +797,7 @@ function selectFeature(id, fromMap) {
   document.getElementById("ip-title").textContent = props.name;
   document.getElementById("ip-body").innerHTML = buildInfo(props);
   document.getElementById("info-panel").classList.add("open");
+  document.getElementById("app").classList.add("panel-open");
 
   // Sidebar active state
   document.querySelectorAll(".feature-item").forEach(el => el.classList.remove("active"));
@@ -795,12 +813,13 @@ function selectFeature(id, fromMap) {
   if (!fromMap) document.getElementById("app").classList.remove("nav-open");
 }
 
-document.getElementById("ip-close").addEventListener("click", () => {
+function closeInfoPanel() {
   document.getElementById("info-panel").classList.remove("open");
-  resetStyle(activeId);
-  document.querySelectorAll(".feature-item").forEach(el => el.classList.remove("active"));
-  activeId = null;
-});
+  document.getElementById("app").classList.remove("panel-open");
+  // Keep map highlight and sidebar selection; user can reopen by tapping the feature again
+}
+
+document.getElementById("ip-close").addEventListener("click", closeInfoPanel);
 
 // ---- Sidebar list ----
 const GROUPS = [
