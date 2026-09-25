@@ -98,6 +98,9 @@
     margin-top: 4px; }
   .ip-actions a:hover { text-decoration: underline; }
 
+  /* Mobile: reopen details after closing the bottom sheet */
+  #detail-reopen { display: none; }
+
   /* Legend */
   #legend {
     position: absolute; bottom: 16px; left: 16px; z-index: 900;
@@ -170,6 +173,22 @@
     #legend.collapsed .legend-title::before { content: "\25B6"; }
     #legend .legend-rows { padding: 0 12px 10px; }
     #legend.collapsed .legend-rows { display: none; }
+
+    #detail-reopen {
+      display: none; align-items: center; justify-content: center; gap: 8px;
+      position: absolute; left: 12px; right: 12px; z-index: 950;
+      bottom: calc(12px + env(safe-area-inset-bottom));
+      padding: 11px 14px; border-radius: 10px; cursor: pointer;
+      background: rgba(16,35,58,0.96); border: 1px solid rgba(255,255,255,0.15);
+      color: var(--text); font-size: 13.5px; font-weight: 600;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.4);
+    }
+    #detail-reopen.visible { display: flex; }
+    #detail-reopen .chev { color: var(--accent); font-size: 11px; }
+    #detail-reopen.visible + #legend {
+      bottom: calc(56px + 12px + env(safe-area-inset-bottom));
+    }
+    #app.panel-open #detail-reopen { display: none !important; }
   }
 </style>
 </head>
@@ -199,6 +218,10 @@
       </div>
       <div class="ip-body" id="ip-body"></div>
     </div>
+
+    <button type="button" id="detail-reopen" aria-label="View details for selected waterway">
+      <span id="detail-reopen-label">View details</span><span class="chev">&#9650;</span>
+    </button>
 
     <div id="legend">
       <div class="legend-title" id="legend-title">Legend</div>
@@ -413,28 +436,64 @@ function buildInfo(props) {
 }
 
 // ---- Selection ----
-function selectFeature(id, fromMap) {
-  // Restore the previously selected feature to its normal color
-  resetStyle(activeId);
-
-  activeId = id;
+function populateInfoPanel(id) {
   const props = DATA.features[id].properties;
-  const layer = layersById[id];
-
-  // Highlight the newly selected feature
-  if (props.geom === "line") layer.setStyle(styleFor(props, true)).bringToFront();
-  else layer.setStyle(pointStyleFor(true)).bringToFront();
-
-  // Info panel
   const badge = document.getElementById("ip-badge");
   badge.textContent = props.category_label;
   badge.style.background = COLORS[props.category] || COLORS.tributary;
   document.getElementById("ip-title").textContent = props.name;
   document.getElementById("ip-body").innerHTML = buildInfo(props);
+}
+
+function openInfoPanel() {
   document.getElementById("info-panel").classList.add("open");
   document.getElementById("app").classList.add("panel-open");
+  syncDetailReopenButton();
+}
 
-  // Sidebar active state
+function closeInfoPanel() {
+  document.getElementById("info-panel").classList.remove("open");
+  document.getElementById("app").classList.remove("panel-open");
+  syncDetailReopenButton();
+}
+
+function syncDetailReopenButton() {
+  const btn = document.getElementById("detail-reopen");
+  const mobile = window.matchMedia("(max-width: 760px)").matches;
+  const panelOpen = document.getElementById("info-panel").classList.contains("open");
+  if (!mobile || activeId === null || panelOpen) {
+    btn.classList.remove("visible");
+    return;
+  }
+  document.getElementById("detail-reopen-label").textContent = DATA.features[activeId].properties.name;
+  btn.classList.add("visible");
+}
+
+function highlightFeature(id) {
+  const props = DATA.features[id].properties;
+  const layer = layersById[id];
+  if (props.geom === "line") layer.setStyle(styleFor(props, true)).bringToFront();
+  else layer.setStyle(pointStyleFor(true)).bringToFront();
+}
+
+function selectFeature(id, fromMap) {
+  const panelOpen = document.getElementById("info-panel").classList.contains("open");
+
+  // Same feature, panel closed: reopen without clearing highlight or re-flying the map
+  if (activeId === id && !panelOpen) {
+    populateInfoPanel(id);
+    openInfoPanel();
+    if (!fromMap) document.getElementById("app").classList.remove("nav-open");
+    return;
+  }
+
+  if (activeId !== null && activeId !== id) resetStyle(activeId);
+
+  activeId = id;
+  highlightFeature(id);
+  populateInfoPanel(id);
+  openInfoPanel();
+
   document.querySelectorAll(".feature-item").forEach(el => el.classList.remove("active"));
   const item = itemsById[id];
   if (item) {
@@ -444,17 +503,14 @@ function selectFeature(id, fromMap) {
 
   focusFeature(id);
 
-  // On mobile, close nav when selecting from list
   if (!fromMap) document.getElementById("app").classList.remove("nav-open");
 }
 
-function closeInfoPanel() {
-  document.getElementById("info-panel").classList.remove("open");
-  document.getElementById("app").classList.remove("panel-open");
-  // Keep map highlight and sidebar selection; user can reopen by tapping the feature again
-}
-
 document.getElementById("ip-close").addEventListener("click", closeInfoPanel);
+document.getElementById("detail-reopen").addEventListener("click", () => {
+  if (activeId !== null) openInfoPanel();
+});
+window.addEventListener("resize", syncDetailReopenButton);
 
 // ---- Sidebar list ----
 const GROUPS = [
