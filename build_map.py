@@ -13,11 +13,21 @@ import json
 import math
 import os
 import re
+import statistics
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KML_PATH = os.path.join(HERE, "doc.kml")
 OUT_PATH = os.path.join(HERE, "index.html")
+ELEV_CACHE_PATH = os.path.join(HERE, "elevation_cache.json")
+
+# Number of evenly-spaced samples per waterway used to draw the elevation profile.
+# Open-Meteo allows up to 100 locations per request, so keep this <= 100.
+PROFILE_SAMPLES = 100
 
 KML_NS = "{http://www.opengis.net/kml/2.2}"
 
@@ -94,6 +104,135 @@ def line_length_km(coords):
     return sum(geodesic_km(coords[i], coords[i + 1]) for i in range(len(coords) - 1))
 
 
+# ---------------------------------------------------------------------------
+# Elevation profile support
+#
+# The KMZ stores every point at altitude 0, so (exactly like Google Earth) the
+# elevation profile must be derived by sampling terrain elevation along the
+# path from a Digital Elevation Model. We use the free Open-Meteo elevation API
+# (Copernicus GLO-90 DEM), sampling evenly-spaced points and caching results so
+# repeated builds do not re-hit the network.
+# ---------------------------------------------------------------------------
+
+def _load_elev_cache():
+    try:
+        with open(ELEV_CACHE_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _save_elev_cache(cache):
+    try:
+        with open(ELEV_CACHE_PATH, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+    except Exception:
+        pass
+
+
+def resample_line(coords, n):
+    """Return n points [lng, lat] evenly spaced by distance along the polyline,
+    together with each point's cumulative distance in km."""
+    if len(coords) < 2:
+        return list(coords), [0.0] * len(coords)
+
+    # cumulative distance at each original vertex
+    cum = [0.0]
+    for i in range(1, len(coords)):
+        cum.append(cum[-1] + geodesic_km(coords[i - 1], coords[i]))
+    total = cum[-1]
+    if total == 0:
+        return [coords[0]] * n, [0.0] * n
+
+    samples = []
+    dists = []
+    seg = 0
+    for i in range(n):
+        target = total * i / (n - 1)
+        while seg < len(cum) - 2 and cum[seg + 1] < target:
+            seg += 1
+        seg_len = cum[seg + 1] - cum[seg]
+        t = 0.0 if seg_len == 0 else (target - cum[seg]) / seg_len
+        a, b = coords[seg], coords[seg + 1]
+        lng = a[0] + (b[0] - a[0]) * t
+        lat = a[1] + (b[1] - a[1]) * t
+        samples.append([lng, lat])
+        dists.append(target)
+    return samples, dists
+
+
+def fetch_elevations(points, cache):
+    """Return a list of elevations (m) for [lng, lat] points, using cache and
+    the Open-Meteo elevation API. Returns None on failure."""
+    result = [None] * len(points)
+    missing = []
+    missing_idx = []
+    for i, (lng, lat) in enumerate(points):
+        key = f"{round(lat, 5)},{round(lng, 5)}"
+        if key in cache:
+            result[i] = cache[key]
+        else:
+            missing.append((lng, lat))
+            missing_idx.append(i)
+
+    if missing:
+        lats = ",".join(f"{lat:.5f}" for (lng, lat) in missing)
+        lngs = ",".join(f"{lng:.5f}" for (lng, lat) in missing)
+        url = ("https://api.open-meteo.com/v1/elevation?latitude="
+               + urllib.parse.quote(lats) + "&longitude=" + urllib.parse.quote(lngs))
+
+        elevs = None
+        for attempt in range(6):
+            try:
+                with urllib.request.urlopen(url, timeout=30) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                elevs = data.get("elevation")
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:                 # rate limited -> back off and retry
+                    wait = 20 * (attempt + 1)
+                    print(f"  ... rate limited (429), waiting {wait}s and retrying")
+                    time.sleep(wait)
+                    continue
+                print("  ! elevation fetch failed:", exc)
+                return None
+            except Exception as exc:
+                print("  ! elevation fetch failed:", exc)
+                return None
+
+        if not elevs or len(elevs) != len(missing):
+            return None
+        for j, idx in enumerate(missing_idx):
+            lng, lat = missing[j]
+            key = f"{round(lat, 5)},{round(lng, 5)}"
+            cache[key] = elevs[j]
+            result[idx] = elevs[j]
+        _save_elev_cache(cache)   # persist progress incrementally
+        time.sleep(1.0)           # be polite to the free API
+
+    if any(v is None for v in result):
+        return None
+    return result
+
+
+def build_profile(coords, cache):
+    """Build an elevation profile for a line: sampled distances (km) and
+    elevations (m). Returns a dict or None."""
+    n = min(PROFILE_SAMPLES, max(2, len(coords)))
+    samples, dists = resample_line(coords, n)
+    elevs = fetch_elevations(samples, cache)
+    if elevs is None:
+        return None
+    elevs_r = [round(e, 1) for e in elevs]
+    return {
+        "d": [round(d, 3) for d in dists],
+        "e": elevs_r,
+        "min": round(min(elevs_r), 1),
+        "max": round(max(elevs_r), 1),
+        "median": round(statistics.median(elevs_r), 1),
+    }
+
+
 def classify(name, geom_type):
     """Return (category, category_label) for grouping/coloring."""
     n = (name or "").lower()
@@ -136,6 +275,7 @@ def main():
 
     features = []
     unnamed_counter = 0
+    elev_cache = _load_elev_cache()
 
     for pm in root.iter(tag("Placemark")):
         name_el = pm.find(tag("name"))
@@ -175,6 +315,10 @@ def main():
                 "bbox": [min(lngs), min(lats), max(lngs), max(lats)],
                 "view": get_view_hint(pm),
             }
+            print(f"  elevation profile: {display_name} ...")
+            profile = build_profile(coords, elev_cache)
+            if profile is not None:
+                props["profile"] = profile
             features.append({
                 "type": "Feature",
                 "properties": props,
@@ -204,6 +348,8 @@ def main():
                 "properties": props,
                 "geometry": {"type": "Point", "coordinates": c},
             })
+
+    _save_elev_cache(elev_cache)
 
     geojson = {"type": "FeatureCollection", "features": features}
 
@@ -312,6 +458,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     margin: 10px 0 4px; }
   .coord-sub:first-child { margin-top: 0; }
   .ip-note { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+  .profile-wrap { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px; padding: 8px 6px 4px; }
+  .profile-wrap svg { display: block; width: 100%; height: auto; }
+  .profile-stats { display: flex; gap: 14px; margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+  .profile-stats b { color: var(--text); font-weight: 600; }
+  .profile-axis { fill: var(--muted); font-size: 9px; }
+  .profile-grid { stroke: rgba(255,255,255,0.10); stroke-width: 1; }
   .ip-actions a { display: inline-block; color: var(--accent); font-size: 13px; text-decoration: none;
     margin-top: 4px; }
   .ip-actions a:hover { text-decoration: underline; }
@@ -515,6 +668,52 @@ function focusFeature(id) {
   }
 }
 
+function buildProfileSVG(profile) {
+  const d = profile.d, e = profile.e;
+  const W = 300, H = 150, padL = 40, padR = 8, padT = 10, padB = 22;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const maxD = d[d.length - 1] || 1;
+  let eMin = Math.min(...e), eMax = Math.max(...e);
+  if (eMax - eMin < 1) { eMax = eMin + 1; }        // avoid flat/zero range
+  const pad = (eMax - eMin) * 0.12;
+  const yLo = eMin - pad, yHi = eMax + pad;
+
+  const X = (v) => padL + (v / maxD) * plotW;
+  const Y = (v) => padT + (1 - (v - yLo) / (yHi - yLo)) * plotH;
+
+  let line = "", area = "";
+  for (let i = 0; i < d.length; i++) {
+    const x = X(d[i]).toFixed(1), y = Y(e[i]).toFixed(1);
+    line += (i === 0 ? "M" : "L") + x + " " + y + " ";
+  }
+  area = line + "L" + X(maxD).toFixed(1) + " " + (padT + plotH).toFixed(1)
+       + " L" + padL.toFixed(1) + " " + (padT + plotH).toFixed(1) + " Z";
+
+  // gridlines + labels (elevation: lo/mid/hi ; distance: 0/mid/max)
+  const yTicks = [yLo + pad, (yLo + yHi) / 2, yHi - pad];
+  let grid = "";
+  yTicks.forEach(t => {
+    const y = Y(t).toFixed(1);
+    grid += `<line class="profile-grid" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"/>`;
+    grid += `<text class="profile-axis" x="${padL - 5}" y="${(+y + 3).toFixed(1)}" text-anchor="end">${t.toFixed(0)} m</text>`;
+  });
+  const xTicks = [0, maxD / 2, maxD];
+  xTicks.forEach((t, i) => {
+    const x = X(t).toFixed(1);
+    const anchor = i === 0 ? "start" : (i === 2 ? "end" : "middle");
+    grid += `<text class="profile-axis" x="${x}" y="${H - 6}" text-anchor="${anchor}">${t.toFixed(1)} km</text>`;
+  });
+
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Elevation profile">`
+       + `<defs><linearGradient id="elevFill" x1="0" y1="0" x2="0" y2="1">`
+       + `<stop offset="0%" stop-color="#2b8fe0" stop-opacity="0.55"/>`
+       + `<stop offset="100%" stop-color="#2b8fe0" stop-opacity="0.05"/></linearGradient></defs>`
+       + grid
+       + `<path d="${area}" fill="url(#elevFill)" stroke="none"/>`
+       + `<path d="${line}" fill="none" stroke="#3aa0ec" stroke-width="1.6" stroke-linejoin="round"/>`
+       + `</svg>`;
+}
+
 function buildInfo(props) {
   let html = "";
 
@@ -524,6 +723,19 @@ function buildInfo(props) {
           + `<div class="sec-label">Length</div>`
           + `<div class="sec-value">${props.length_km.toFixed(2)} km</div>`
           + `</div>`;
+
+    // Elevation profile (terrain sampled along the path, like Google Earth)
+    if (props.profile && props.profile.e && props.profile.e.length > 1) {
+      const p = props.profile;
+      html += `<div class="ip-section">`
+            + `<div class="sec-label">Elevation profile</div>`
+            + `<div class="profile-wrap">${buildProfileSVG(p)}</div>`
+            + `<div class="profile-stats">`
+            + `<span>Min <b>${p.min.toFixed(1)} m</b></span>`
+            + `<span>Median <b>${p.median.toFixed(1)} m</b></span>`
+            + `<span>Max <b>${p.max.toFixed(1)} m</b></span>`
+            + `</div></div>`;
+    }
     // Coordinates section: start / end / midpoint
     html += `<div class="ip-section">`
           + `<div class="sec-label">Coordinates</div>`

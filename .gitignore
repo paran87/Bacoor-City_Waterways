@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+
+# Local build artifacts / temp verification helpers
+elevation_cache.json
+_server.js
+_inline.js
