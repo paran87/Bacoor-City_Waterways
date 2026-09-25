@@ -41,19 +41,57 @@ def parse_coords(text):
     return coords
 
 
-def haversine_km(a, b):
-    """Distance in km between two [lng, lat] points."""
-    r = 6371.0
-    lng1, lat1 = math.radians(a[0]), math.radians(a[1])
-    lng2, lat2 = math.radians(b[0]), math.radians(b[1])
-    dlat = lat2 - lat1
-    dlng = lng2 - lng1
-    h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(h))
+def geodesic_km(a, b):
+    """WGS84 ellipsoidal (Vincenty inverse) distance in km between two
+    [lng, lat] points. This matches Google Earth's length measurement."""
+    A = 6378137.0                 # WGS84 semi-major axis (m)
+    f = 1 / 298.257223563         # WGS84 flattening
+    B = A * (1 - f)               # semi-minor axis (m)
+
+    L = math.radians(b[0] - a[0])
+    U1 = math.atan((1 - f) * math.tan(math.radians(a[1])))
+    U2 = math.atan((1 - f) * math.tan(math.radians(b[1])))
+    sU1, cU1 = math.sin(U1), math.cos(U1)
+    sU2, cU2 = math.sin(U2), math.cos(U2)
+
+    lam = L
+    cos2_alpha = 0.0
+    sin_sigma = 0.0
+    cos_sigma = 0.0
+    sigma = 0.0
+    cos_2sigma_m = 0.0
+    for _ in range(200):
+        sl, cl = math.sin(lam), math.cos(lam)
+        sin_sigma = math.sqrt((cU2 * sl) ** 2 + (cU1 * sU2 - sU1 * cU2 * cl) ** 2)
+        if sin_sigma == 0:
+            return 0.0  # coincident points
+        cos_sigma = sU1 * sU2 + cU1 * cU2 * cl
+        sigma = math.atan2(sin_sigma, cos_sigma)
+        sin_alpha = cU1 * cU2 * sl / sin_sigma
+        cos2_alpha = 1 - sin_alpha ** 2
+        cos_2sigma_m = cos_sigma - 2 * sU1 * sU2 / cos2_alpha if cos2_alpha != 0 else 0.0
+        C = f / 16 * cos2_alpha * (4 + f * (4 - 3 * cos2_alpha))
+        lam_prev = lam
+        lam = L + (1 - C) * f * sin_alpha * (
+            sigma + C * sin_sigma * (cos_2sigma_m + C * cos_sigma * (-1 + 2 * cos_2sigma_m ** 2))
+        )
+        if abs(lam - lam_prev) < 1e-12:
+            break
+
+    u2 = cos2_alpha * (A ** 2 - B ** 2) / (B ** 2)
+    Aa = 1 + u2 / 16384 * (4096 + u2 * (-768 + u2 * (320 - 175 * u2)))
+    Bb = u2 / 1024 * (256 + u2 * (-128 + u2 * (74 - 47 * u2)))
+    d_sigma = Bb * sin_sigma * (
+        cos_2sigma_m + Bb / 4 * (
+            cos_sigma * (-1 + 2 * cos_2sigma_m ** 2)
+            - Bb / 6 * cos_2sigma_m * (-3 + 4 * sin_sigma ** 2) * (-3 + 4 * cos_2sigma_m ** 2)
+        )
+    )
+    return (B * Aa * (sigma - d_sigma)) / 1000.0
 
 
 def line_length_km(coords):
-    return sum(haversine_km(coords[i], coords[i + 1]) for i in range(len(coords) - 1))
+    return sum(geodesic_km(coords[i], coords[i + 1]) for i in range(len(coords) - 1))
 
 
 def classify(name, geom_type):
@@ -261,13 +299,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #info-panel .ip-close { margin-left: auto; cursor: pointer; color: var(--muted); background: none;
     border: none; font-size: 20px; line-height: 1; padding: 0 2px; }
   #info-panel .ip-close:hover { color: var(--text); }
-  #info-panel .ip-body { padding: 12px 16px 16px; }
-  .stat-row { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0;
-    border-bottom: 1px dashed rgba(255,255,255,0.08); font-size: 13px; }
-  .stat-row:last-child { border-bottom: none; }
-  .stat-row .k { color: var(--muted); }
-  .stat-row .v { text-align: right; font-variant-numeric: tabular-nums; }
-  .ip-note { margin-top: 10px; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+  #info-panel .ip-body { padding: 0; max-height: 70vh; overflow-y: auto; }
+  /* Google-Earth-style sections */
+  .ip-section { padding: 14px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+  .ip-section:last-child { border-bottom: none; }
+  .ip-section .sec-label { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+  .ip-section .sec-value { font-size: 20px; font-weight: 600; color: #fff; font-variant-numeric: tabular-nums; }
+  .coord-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
+  .coord-grid .ck { color: var(--muted); }
+  .coord-grid .cv { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
+  .coord-sub { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px;
+    margin: 10px 0 4px; }
+  .coord-sub:first-child { margin-top: 0; }
+  .ip-note { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+  .ip-actions a { display: inline-block; color: var(--accent); font-size: 13px; text-decoration: none;
+    margin-top: 4px; }
+  .ip-actions a:hover { text-decoration: underline; }
 
   /* Legend */
   #legend {
@@ -431,9 +478,24 @@ const geoLayer = L.geoJSON(DATA, {
 try { map.fitBounds(geoLayer.getBounds().pad(0.05)); } catch (e) {}
 
 // ---- Helpers ----
-function fmtCoord(c) {
+function fmtLat(c) {
   if (!c) return "&mdash;";
-  return c[1].toFixed(5) + ", " + c[0].toFixed(5); // lat, lng
+  const v = c[1];
+  return Math.abs(v).toFixed(6) + "\u00b0 " + (v >= 0 ? "N" : "S");
+}
+function fmtLng(c) {
+  if (!c) return "&mdash;";
+  const v = c[0];
+  return Math.abs(v).toFixed(6) + "\u00b0 " + (v >= 0 ? "E" : "W");
+}
+function coordPair(label, c) {
+  if (label) {
+    return `<div class="coord-sub">${label}</div>`
+      + `<div class="coord-grid"><span class="ck">Latitude</span><span class="cv">${fmtLat(c)}</span>`
+      + `<span class="ck">Longitude</span><span class="cv">${fmtLng(c)}</span></div>`;
+  }
+  return `<div class="coord-grid"><span class="ck">Latitude</span><span class="cv">${fmtLat(c)}</span>`
+    + `<span class="ck">Longitude</span><span class="cv">${fmtLng(c)}</span></div>`;
 }
 
 function boundsOf(id) {
@@ -454,26 +516,35 @@ function focusFeature(id) {
 }
 
 function buildInfo(props) {
-  const rows = [];
-  rows.push(["Type", props.category_label]);
-  if (props.geom === "line") {
-    rows.push(["Approx. length", props.length_km.toFixed(2) + " km"]);
-    rows.push(["Path points", props.num_points.toLocaleString()]);
-    rows.push(["Start (lat, lng)", fmtCoord(props.start)]);
-    rows.push(["End (lat, lng)", fmtCoord(props.end)]);
-    rows.push(["Center (lat, lng)", fmtCoord(props.center)]);
-  } else {
-    rows.push(["Location (lat, lng)", fmtCoord(props.center)]);
-  }
-  let html = rows.map(r =>
-    `<div class="stat-row"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`
-  ).join("");
+  let html = "";
 
-  const gmapC = props.geom === "line" ? props.center : props.center;
-  const gmaps = `https://www.google.com/maps/search/?api=1&query=${gmapC[1]},${gmapC[0]}`;
-  html += `<div class="ip-note">Part of the Bacoor City waterways network. `
-        + `Metadata is derived from the source KMZ geometry.<br><br>`
-        + `<a href="${gmaps}" target="_blank" style="color:var(--accent)">Open location in Google Maps &rarr;</a></div>`;
+  if (props.geom === "line") {
+    // Length section (accurate WGS84 geodesic length, matches Google Earth)
+    html += `<div class="ip-section">`
+          + `<div class="sec-label">Length</div>`
+          + `<div class="sec-value">${props.length_km.toFixed(2)} km</div>`
+          + `</div>`;
+    // Coordinates section: start / end / midpoint
+    html += `<div class="ip-section">`
+          + `<div class="sec-label">Coordinates</div>`
+          + coordPair("Start point", props.start)
+          + coordPair("End point", props.end)
+          + coordPair("Midpoint", props.center)
+          + `</div>`;
+  } else {
+    // Point (dam / bay / landmark): latitude & longitude are the priority
+    html += `<div class="ip-section">`
+          + `<div class="sec-label">Coordinates</div>`
+          + coordPair("", props.center)
+          + `</div>`;
+  }
+
+  const c = props.center;
+  const gmaps = `https://www.google.com/maps/search/?api=1&query=${c[1]},${c[0]}`;
+  html += `<div class="ip-section ip-actions">`
+        + `<a href="${gmaps}" target="_blank">Open location in Google Maps &rarr;</a>`
+        + `<div class="ip-note" style="margin-top:8px">Data derived directly from the source KMZ geometry.</div>`
+        + `</div>`;
   return html;
 }
 
